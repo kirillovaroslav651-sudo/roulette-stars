@@ -8,8 +8,6 @@ import { initDb } from "./db";
 import { createBot } from "./bot";
 import { Telegraf } from "telegraf";
 
-initDb();
-
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -40,6 +38,7 @@ if (BASE_URL && BASE_URL.startsWith("http://localhost")) BASE_URL = ""; // ло�
 const PUBLIC = BASE_URL || process.env.WEBAPP_URL || "";
 
 async function start() {
+  await initDb();
   const bot = await createBot();
 
   if (MODE === "webhook") {
