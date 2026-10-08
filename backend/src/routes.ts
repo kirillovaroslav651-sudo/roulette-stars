@@ -134,7 +134,7 @@ router.post("/bet", requireAuth, (req: any, res: Response) => {
   const game = (req.body.game as string) ?? "roulette";
   const choice = (req.body.choice as string) ?? undefined;
 
-  const VALID_GAMES = ["roulette", "coin", "dice", "highlow", "lucky"];
+  const VALID_GAMES = ["roulette", "coin", "case"];
   if (!VALID_GAMES.includes(game))
     return res.status(400).json({ ok: false, error: "invalid_game" });
 
