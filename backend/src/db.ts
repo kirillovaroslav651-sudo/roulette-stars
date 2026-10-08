@@ -8,7 +8,13 @@ if (!connectionString) {
   throw new Error("DATABASE_URL (Supabase Postgres) не задан");
 }
 
-export const pool = new Pool({ connectionString });
+export const pool = new Pool({
+  connectionString,
+  // Supabase требует SSL; отключаем проверку сертификата (самоподписанный/туннельный)
+  ssl: { rejectUnauthorized: false },
+  // Принудительно IPv4 — Render не имеет IPv6-маршрута (иначе ENETUNREACH)
+  family: 4,
+} as any);
 
 /** Пакет покупки: стоимость в XTR = количество звёзд. */
 type Package = {
