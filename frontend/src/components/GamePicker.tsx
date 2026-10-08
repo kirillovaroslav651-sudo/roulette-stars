@@ -1,11 +1,9 @@
-export type GameId = "roulette" | "coin" | "dice" | "highlow" | "lucky";
+export type GameId = "roulette" | "coin" | "case";
 
 export const GAMES: { id: GameId; name: string; emoji: string; desc: string }[] = [
   { id: "roulette", name: "Рулетка", emoji: "🎰", desc: "50/50 ×2" },
   { id: "coin", name: "Монетка", emoji: "🪙", desc: "Орёл/Решка ×2" },
-  { id: "dice", name: "Кубик", emoji: "🎲", desc: "Чёт/Больше ×2" },
-  { id: "highlow", name: "Карты", emoji: "🃏", desc: "Выше/Ниже ×1.8" },
-  { id: "lucky", name: "Лотерея", emoji: "🍀", desc: "Джекпот ×3" },
+  { id: "case", name: "Кейсы", emoji: "📦", desc: "Награды ×10" },
 ];
 
 type Props = {
