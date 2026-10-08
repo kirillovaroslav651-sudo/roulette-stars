@@ -12,9 +12,7 @@ const TYPE_LABEL: Record<Tx["type"], string> = {
 const GAME_LABEL: Record<string, string> = {
   roulette: "🎰",
   coin: "🪙",
-  dice: "🎲",
-  highlow: "🃏",
-  lucky: "🍀",
+  case: "📦",
 };
 
 function fmtDate(ts: number): string {
