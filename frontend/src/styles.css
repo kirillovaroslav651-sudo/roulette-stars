@@ -161,9 +161,9 @@ body {
   );
   border: 6px solid var(--accent);
   box-shadow: 0 0 40px rgba(139, 92, 246, 0.5);
-  animation: spin 0s linear;
+  transition: transform 0.1s ease;
 }
-.wheel--spinning { animation-duration: 3s !important; }
+.wheel--spinning { animation: spin 2s cubic-bezier(0.2, 0.8, 0.3, 1) forwards; }
 .wheel--win { box-shadow: 0 0 50px rgba(74, 222, 128, 0.8); }
 .wheel--lose { box-shadow: 0 0 50px rgba(248, 113, 113, 0.7); }
 .wheel .pointer {
@@ -186,8 +186,9 @@ body {
 }
 @keyframes spin {
   0% { transform: rotate(0deg); }
-  100% { transform: rotate(1440deg); }
+  100% { transform: rotate(1980deg); } /* 5.5 оборота с торможением */
 }
+
 .reveal {
   font-size: 26px;
   font-weight: 800;
@@ -202,6 +203,37 @@ body {
 @keyframes pop {
   0% { transform: scale(0.6); opacity: 0; }
   100% { transform: scale(1); opacity: 1; }
+}
+
+/* ── Кейс ── */
+.case {
+  width: 200px;
+  height: 200px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 20px;
+  background: var(--surface-2);
+  border: 2px solid var(--border);
+  transition: box-shadow 0.3s ease;
+}
+.case-box { font-size: 90px; line-height: 1; }
+.case--shaking { animation: shake 0.6s ease-in-out infinite; }
+.case--won { box-shadow: 0 0 50px rgba(74, 222, 128, 0.6); }
+.case--lost { box-shadow: 0 0 30px rgba(248, 113, 113, 0.4); }
+.case-reward {
+  font-size: 36px;
+  font-weight: 900;
+  min-height: 44px;
+  animation: pop 0.5s ease;
+}
+@keyframes shake {
+  0%, 100% { transform: translateX(0) rotate(0); }
+  25% { transform: translateX(-6px) rotate(-3deg); }
+  50% { transform: translateX(6px) rotate(3deg); }
+  75% { transform: translateX(-3px) rotate(-1deg); }
 }
 
 /* ── Модалка ── */
