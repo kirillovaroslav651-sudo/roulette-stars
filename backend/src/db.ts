@@ -1,32 +1,14 @@
-import { DatabaseSync } from "node:sqlite";
-import path from "path";
+import { Pool } from "pg";
 import crypto from "crypto";
 
-// Единый экземпляр БД на процесс.
-// Путь к БД можно переопределить через env DB_PATH (напр. на смонтированный диск Выделя в Render),
-// иначе используется data/roulette.db рядом с бэкендом.
-const fs = require("fs");
-let dataDir = process.env.DB_PATH ? path.dirname(process.env.DB_PATH) : path.join(__dirname, "..", "data");
-const dbFile = process.env.DB_PATH || path.join(dataDir, "roulette.db");
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-
-const db = new DatabaseSync(dbFile);
-db.exec("PRAGMA journal_mode = WAL");
-
-/** Обёртка над транзакцией для node:sqlite (аналог better-sqlite3 .transaction). */
-function transaction<T extends (...args: any[]) => any>(fn: T): T {
-  return ((...args: Parameters<T>) => {
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = fn(...args);
-      db.exec("COMMIT");
-      return result;
-    } catch (err) {
-      db.exec("ROLLBACK");
-      throw err;
-    }
-  }) as T;
+// Единый пул подключений к Postgres.
+// Строка подключения берётся из DATABASE_URL (её даст Supabase).
+const connectionString = process.env.DATABASE_URL;
+if (!connectionString) {
+  throw new Error("DATABASE_URL (Supabase Postgres) не задан");
 }
+
+export const pool = new Pool({ connectionString });
 
 /** Пакет покупки: стоимость в XTR = количество звёзд. */
 type Package = {
@@ -42,7 +24,7 @@ export const PACKAGES: Package[] = [
   { id: "pkg-500", amount: 500, title: "500 звёзд" },
 ];
 
-// Комиссия рефеферала, % от пополнения приглашённым
+// Комиссия рефереферала, % от пополнения приглашённым
 export const REFERRAL_PERCENT = 10;
 
 export type BetResult = "win" | "lose";
@@ -55,57 +37,61 @@ export type TxType =
   | "daily_bonus";
 
 /** Инициализация схемы (idempotent). */
-export function initDb() {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      telegram_id   INTEGER PRIMARY KEY,
-      username      TEXT,
-      balance       INTEGER NOT NULL DEFAULT 0,
-      ref_code      TEXT UNIQUE,
-      referred_by   INTEGER REFERENCES users(telegram_id),
-      created_at    INTEGER NOT NULL DEFAULT (unixepoch())
-    );
+export async function initDb() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        telegram_id   BIGINT PRIMARY KEY,
+        username      TEXT,
+        balance       INTEGER NOT NULL DEFAULT 0,
+        ref_code      TEXT UNIQUE,
+        referred_by   BIGINT REFERENCES users(telegram_id),
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS transactions (
+        id          SERIAL PRIMARY KEY,
+        user_id     BIGINT NOT NULL REFERENCES users(telegram_id),
+        type        TEXT NOT NULL,
+        amount      INTEGER NOT NULL,
+        game        TEXT,
+        choice      TEXT,
+        ref         TEXT,
+        bet_id      TEXT,
+        spin_result TEXT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id, created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_bet ON transactions(bet_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_purchase_ref ON transactions(ref);
+      CREATE TABLE IF NOT EXISTS orders (
+        payload      TEXT PRIMARY KEY,
+        user_id      BIGINT NOT NULL,
+        package_id   TEXT NOT NULL,
+        amount       INTEGER NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
+      CREATE TABLE IF NOT EXISTS daily_bonus (
+        user_id     BIGINT PRIMARY KEY,
+        last_day    TEXT NOT NULL
+      );
+    `);
 
-    CREATE TABLE IF NOT EXISTS transactions (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id     INTEGER NOT NULL REFERENCES users(telegram_id),
-      type        TEXT NOT NULL,
-      amount      INTEGER NOT NULL,
-      game        TEXT,
-      choice      TEXT,
-      ref         TEXT,
-      bet_id      TEXT,
-      spin_result TEXT,
-      created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+    // ref_code для всех, у кого его нет
+    const missing = await client.query(
+      `SELECT telegram_id FROM users WHERE ref_code IS NULL`
     );
-    CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id, created_at);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_bet ON transactions(bet_id);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_purchase_ref ON transactions(ref);
-
-    -- Незавершённые покупки: payload → юзер и пакет
-    CREATE TABLE IF NOT EXISTS orders (
-      payload      TEXT PRIMARY KEY,
-      user_id      INTEGER NOT NULL,
-      package_id   TEXT NOT NULL,
-      amount       INTEGER NOT NULL,
-      status       TEXT NOT NULL DEFAULT 'pending',
-      created_at   INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-    CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
-
-    -- Ежедневный бонус: один акт в сутки
-    CREATE TABLE IF NOT EXISTS daily_bonus (
-      user_id     INTEGER PRIMARY KEY,
-      last_day    TEXT NOT NULL
-    );
-  `);
-
-  // ref_code для всех, у кого его нет (переносимость появившихся миграций)
-  const missing = db
-    .prepare(`SELECT telegram_id FROM users WHERE ref_code IS NULL`)
-    .all();
-  const upd = db.prepare(`UPDATE users SET ref_code = ? WHERE telegram_id = ?`);
-  for (const u of missing as any[]) upd.run(makeRefCode(), u.telegram_id);
+    for (const u of missing.rows as any[]) {
+      await client.query(`UPDATE users SET ref_code = $1 WHERE telegram_id = $2`, [
+        makeRefCode(),
+        u.telegram_id,
+      ]);
+    }
+  } finally {
+    client.release();
+  }
 }
 
 /** Случайный короткий реферальный код. */
@@ -113,35 +99,38 @@ export function makeRefCode(): string {
   return crypto.randomBytes(4).toString("hex");
 }
 
-/** Возвращает запись юзера или undefined. */
-export function getRawUser(telegramId: number): any {
-  return db.prepare(`SELECT * FROM users WHERE telegram_id = ?`).get(telegramId);
+/** Возвращает запись юзера или undefined. Row — объект с полями snake_case? Нет, из pg — lowercased имена. */
+export async function getRawUser(telegramId: number): Promise<any> {
+  const r = await pool.query(`SELECT * FROM users WHERE telegram_id = $1`, [telegramId]);
+  return r.rows[0];
 }
 
-export function getUser(telegramId: number): any {
+export async function getUser(telegramId: number): Promise<any> {
   return getRawUser(telegramId);
 }
 
 /** Создать юзера при первом входе (upsert по telegram_id). */
-export function ensureUser(
+export async function ensureUser(
   telegramId: number,
   username: string | undefined,
   referredBy: number | null = null
-): any {
-  const existing = getRawUser(telegramId);
+): Promise<any> {
+  const existing = await getRawUser(telegramId);
   if (existing) return existing;
 
-  db.prepare(
-    `INSERT OR IGNORE INTO users (telegram_id, username, ref_code, referred_by)
-     VALUES (?, ?, ?, ?)`
-  ).run(telegramId, username ?? null, makeRefCode(), referredBy);
+  await pool.query(
+    `INSERT INTO users (telegram_id, username, ref_code, referred_by)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (telegram_id) DO NOTHING`,
+    [telegramId, username ?? null, makeRefCode(), referredBy]
+  );
   return getRawUser(telegramId);
 }
 
 /**
  * Начислить/списать с созданием транзакции, с идемпотентностью.
  */
-export function applyTx(
+export async function applyTx(
   telegramId: number,
   type: TxType,
   amount: number,
@@ -152,47 +141,60 @@ export function applyTx(
     game?: string;
     choice?: string;
   } = {}
-): void {
+): Promise<void> {
   if (opts.betId) {
-    const exists = db.prepare(`SELECT id FROM transactions WHERE bet_id = ?`).get(opts.betId);
-    if (exists) return;
+    const exists = await pool.query(`SELECT id FROM transactions WHERE bet_id = $1`, [opts.betId]);
+    if (exists.rows[0]) return;
   }
   if (opts.ref) {
-    const exists = db.prepare(`SELECT id FROM transactions WHERE ref = ?`).get(opts.ref);
-    if (exists) return;
+    const exists = await pool.query(`SELECT id FROM transactions WHERE ref = $1`, [opts.ref]);
+    if (exists.rows[0]) return;
   }
 
   if (amount < 0) {
-    const u = getRawUser(telegramId);
-    if (!u || u.balance + amount < 0) throw new Error("insufficient_balance");
+    const u = await getRawUser(telegramId);
+    if (!u || Number(u.balance) + amount < 0) throw new Error("insufficient_balance");
   }
 
-  transaction(() => {
-    db.prepare(`UPDATE users SET balance = balance + ? WHERE telegram_id = ?`).run(amount, telegramId);
-    db.prepare(
-      `INSERT INTO transactions (user_id, type, amount, ref, bet_id, spin_result, game, choice)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      telegramId,
-      type,
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`UPDATE users SET balance = balance + $1 WHERE telegram_id = $2`, [
       amount,
-      opts.ref ?? null,
-      opts.betId ?? null,
-      opts.spinResult ?? null,
-      opts.game ?? null,
-      opts.choice ?? null
+      telegramId,
+    ]);
+    await client.query(
+      `INSERT INTO transactions (user_id, type, amount, ref, bet_id, spin_result, game, choice)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        telegramId,
+        type,
+        amount,
+        opts.ref ?? null,
+        opts.betId ?? null,
+        opts.spinResult ?? null,
+        opts.game ?? null,
+        opts.choice ?? null,
+      ]
     );
-  })();
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 /** История транзакций юзера. */
-export function getTransactions(telegramId: number, limit = 20): any[] {
-  return db
-    .prepare(
-      `SELECT id, type, amount, spin_result, game, choice, created_at
-       FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT ?`
-    )
-    .all(telegramId, limit);
+export async function getTransactions(telegramId: number, limit = 20): Promise<any[]> {
+  const r = await pool.query(
+    `SELECT id, type, amount, spin_result, game, choice,
+            extract(epoch from created_at)::int AS created_at
+     FROM transactions WHERE user_id = $1 ORDER BY id DESC LIMIT $2`,
+    [telegramId, limit]
+  );
+  return r.rows;
 }
 
 /** Резолвер исхода игры. */
@@ -206,19 +208,16 @@ function resolveGame(
       return { won: choice === result, multiplier: 2, label: result };
     }
     case "case": {
-      // Кейс (как в CS:GO): платишь цену кейса, получаешь случайную награду по редкости.
       const roll = Math.random();
-      // Таблица редкостей: [шанс, множитель, название]
       let rarity: { mult: number; name: string };
-      if (roll < 0.5) rarity = { mult: 1, name: "обычный" };        // 50% — возврат ставки
-      else if (roll < 0.75) rarity = { mult: 2, name: "редкий" };   // 25% — ×2
-      else if (roll < 0.93) rarity = { mult: 4, name: "эпический" }; // 18% — ×4
-      else rarity = { mult: 10, name: "легендарный" };               // 7% — ×10
-      const won = rarity.mult > 1; // обычный = возврат (не проигрыш, но и не выигрыш сверх ставки)
+      if (roll < 0.5) rarity = { mult: 1, name: "обычный" };
+      else if (roll < 0.75) rarity = { mult: 2, name: "редкий" };
+      else if (roll < 0.93) rarity = { mult: 4, name: "эпический" };
+      else rarity = { mult: 10, name: "легендарный" };
+      const won = rarity.mult > 1;
       return { won, multiplier: rarity.mult, label: rarity.name };
     }
     default:
-      // rulette — 50/50
       return { won: Math.random() < 0.5, multiplier: 2, label: "" };
   }
 }
@@ -226,32 +225,33 @@ function resolveGame(
 /**
  * Выполнить ставку атомарно (идемпотентно по betId).
  */
-export const placeBet = transaction(
-  (
-    telegramId: number,
-    betAmount: number,
-    betId: string,
-    game: string = "roulette",
-    choice?: string
-  ): { won: boolean; delta: number; outcome?: string; multiplier?: number } => {
-    const existing = db
-      .prepare(`SELECT spin_result FROM transactions WHERE bet_id = ?`)
-      .get(betId);
-    if (existing) {
+export async function placeBet(
+  telegramId: number,
+  betAmount: number,
+  betId: string,
+  game: string = "roulette",
+  choice?: string
+): Promise<{ won: boolean; delta: number; outcome?: string; multiplier?: number }> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const existing = await client.query(`SELECT spin_result FROM transactions WHERE bet_id = $1`, [betId]);
+    if (existing.rows[0]) {
+      await client.query("ROLLBACK");
       return {
-        won: (existing as any).spin_result === "win",
-        delta: (existing as any).spin_result === "win" ? +betAmount : -betAmount,
+        won: existing.rows[0].spin_result === "win",
+        delta: existing.rows[0].spin_result === "win" ? +betAmount : -betAmount,
       };
     }
 
-    const user = getRawUser(telegramId);
+    const userRes = await client.query(`SELECT * FROM users WHERE telegram_id = $1 FOR UPDATE`, [telegramId]);
+    const user = userRes.rows[0];
     if (!user) throw new Error("user_not_found");
     if (betAmount <= 0) throw new Error("invalid_bet");
-    if (betAmount > user.balance) throw new Error("insufficient_balance");
+    if (betAmount > Number(user.balance)) throw new Error("insufficient_balance");
 
     const outcome = resolveGame(game, choice);
-    // Для кейса delta = чистая прибыль = ставка*(множитель-1).
-    // Для остальных: win = +ставка (×2), lose = -ставка.
     let delta: number;
     if (game === "case") {
       delta = Math.round(betAmount * (outcome.multiplier - 1));
@@ -259,43 +259,54 @@ export const placeBet = transaction(
       delta = outcome.won ? Math.round(betAmount * outcome.multiplier) : -betAmount;
     }
 
-    db.prepare(`UPDATE users SET balance = balance + ? WHERE telegram_id = ?`).run(delta, telegramId);
-    db.prepare(
+    await client.query(`UPDATE users SET balance = balance + $1 WHERE telegram_id = $2`, [delta, telegramId]);
+    await client.query(
       `INSERT INTO transactions (user_id, type, amount, bet_id, spin_result, game, choice)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      telegramId,
-      outcome.won ? "bet_win" : "bet_lose",
-      delta,
-      betId,
-      outcome.won ? "win" : "lose",
-      game,
-      choice ?? null
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        telegramId,
+        outcome.won ? "bet_win" : "bet_lose",
+        delta,
+        betId,
+        outcome.won ? "win" : "lose",
+        game,
+        choice ?? null,
+      ]
     );
 
+    await client.query("COMMIT");
     return { won: outcome.won, delta, outcome: outcome.label, multiplier: outcome.multiplier };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
   }
-);
+}
 
 /** Накрутка звёзд админом. */
-export function adminCredit(telegramId: number, amount: number): number {
-  applyTx(telegramId, "admin_credit", amount);
-  return getRawUser(telegramId).balance;
+export async function adminCredit(telegramId: number, amount: number): Promise<number> {
+  await applyTx(telegramId, "admin_credit", amount);
+  const u = await getRawUser(telegramId);
+  return Number(u.balance);
 }
 
 /** Создание заказа для invoice. */
-export function createOrder(payload: string, userId: number, packageId: string, amount: number): void {
-  db.prepare(
-    `INSERT OR IGNORE INTO orders (payload, user_id, package_id, amount) VALUES (?,?,?,?)`
-  ).run(payload, userId, packageId, amount);
+export async function createOrder(payload: string, userId: number, packageId: string, amount: number): Promise<void> {
+  await pool.query(
+    `INSERT INTO orders (payload, user_id, package_id, amount) VALUES ($1,$2,$3,$4)
+     ON CONFLICT (payload) DO NOTHING`,
+    [payload, userId, packageId, amount]
+  );
 }
 
-export function getOrder(payload: string): any {
-  return db.prepare(`SELECT * FROM orders WHERE payload = ?`).get(payload);
+export async function getOrder(payload: string): Promise<any> {
+  const r = await pool.query(`SELECT * FROM orders WHERE payload = $1`, [payload]);
+  return r.rows[0];
 }
 
-export function markOrderPaid(payload: string): void {
-  db.prepare(`UPDATE orders SET status = 'paid' WHERE payload = ?`).run(payload);
+export async function markOrderPaid(payload: string): Promise<void> {
+  await pool.query(`UPDATE orders SET status = 'paid' WHERE payload = $1`, [payload]);
 }
 
 /** Московская дата (YYYY-MM-DD). */
@@ -304,35 +315,42 @@ export function moscowDay(): string {
 }
 
 /** Начислить ежедневный бонус, если сегодня ещё не начисляли. */
-export function claimDailyBonus(telegramId: number, amount: number): { granted: boolean; bonus: number } {
+export async function claimDailyBonus(telegramId: number, amount: number): Promise<{ granted: boolean; bonus: number }> {
   const day = moscowDay();
-  const row: any = db.prepare(`SELECT last_day FROM daily_bonus WHERE user_id = ?`).get(telegramId);
-  if (row && row.last_day === day) return { granted: false, bonus: 0 };
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const before = await client.query(`SELECT last_day FROM daily_bonus WHERE user_id = $1 FOR UPDATE`, [telegramId]);
+    if (before.rows[0] && before.rows[0].last_day === day) {
+      await client.query("ROLLBACK");
+      return { granted: false, bonus: 0 };
+    }
+    await client.query(
+      `INSERT INTO daily_bonus (user_id, last_day) VALUES ($1, $2)
+       ON CONFLICT (user_id) DO UPDATE SET last_day = EXCLUDED.last_day`,
+      [telegramId, day]
+    );
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
 
-  const changed = transaction(() => {
-    const before: any = db
-      .prepare(`SELECT last_day FROM daily_bonus WHERE user_id = ?`)
-      .get(telegramId);
-    if (before && before.last_day === day) return false; // параллельный запрос уже начислил
-
-    db.prepare(
-      `INSERT INTO daily_bonus (user_id, last_day) VALUES (?, ?)
-       ON CONFLICT(user_id) DO UPDATE SET last_day = excluded.last_day`
-    ).run(telegramId, day);
-
-    applyTx(telegramId, "daily_bonus", amount);
-    return true;
-  })();
-
-  return changed ? { granted: true, bonus: amount } : { granted: false, bonus: 0 };
+  // начисляем бонус (вне транзакции блокировки, но идемпотентно по дню)
+  await applyTx(telegramId, "daily_bonus", amount);
+  return { granted: true, bonus: amount };
 }
 
 /** Бонус пригласившему за покупку. */
-export function grantReferralBonus(referrerId: number, purchaseAmount: number): number {
+export async function grantReferralBonus(referrerId: number, purchaseAmount: number): Promise<number> {
   const bonus = Math.round(purchaseAmount * (REFERRAL_PERCENT / 100));
   if (bonus <= 0) return 0;
-  applyTx(referrerId, "referral_bonus", bonus);
+  await applyTx(referrerId, "referral_bonus", bonus);
   return bonus;
 }
 
 export { db };
+
+const db = pool;
