@@ -2,13 +2,15 @@ import { DatabaseSync } from "node:sqlite";
 import path from "path";
 import crypto from "crypto";
 
-// Единый экземпляр БД на процесс. Файл лежит рядом с бэкендом — data/roulette.db
-// Используем встроенный node:sqlite (Node >= 22) — не требует компиляции.
-const dataDir = path.join(__dirname, "..", "data");
+// Единый экземпляр БД на процесс.
+// Путь к БД можно переопределить через env DB_PATH (напр. на смонтированный диск Выделя в Render),
+// иначе используется data/roulette.db рядом с бэкендом.
 const fs = require("fs");
+let dataDir = process.env.DB_PATH ? path.dirname(process.env.DB_PATH) : path.join(__dirname, "..", "data");
+const dbFile = process.env.DB_PATH || path.join(dataDir, "roulette.db");
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
-const db = new DatabaseSync(path.join(dataDir, "roulette.db"));
+const db = new DatabaseSync(dbFile);
 db.exec("PRAGMA journal_mode = WAL");
 
 /** Обёртка над транзакцией для node:sqlite (аналог better-sqlite3 .transaction). */
