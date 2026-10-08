@@ -34,13 +34,15 @@ if (fs.existsSync(frontendDist)) {
 
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
 const MODE = (process.env.BOT_MODE ?? "webhook") as "webhook" | "polling";
-const BASE_URL = process.env.BASE_URL ?? `http://localhost:${PORT}`;
+// Автоопределение публичного URL: если не задан, берём из реального хоста запроса.
+let BASE_URL = process.env.BASE_URL ?? "";
+if (BASE_URL && BASE_URL.startsWith("http://localhost")) BASE_URL = ""; // локальный — не годится
+const PUBLIC = BASE_URL || process.env.WEBAPP_URL || "";
 
 async function start() {
   const bot = await createBot();
 
   if (MODE === "webhook") {
-    // Вебхук Telegram → бот. Secret token защищает от чужих апдейтов.
     const secret = process.env.WEBHOOK_SECRET ?? "changeme";
     app.post("/webhook/telegram", async (req, res) => {
       try {
@@ -52,11 +54,21 @@ async function start() {
       }
     });
     app.listen(PORT, async () => {
-      console.log(`API на http://localhost:${PORT}, webhook на ${BASE_URL}/webhook/telegram`);
-      await bot.telegram.setWebhook(`${BASE_URL}/webhook/telegram`, {
-        secret_token: secret,
-      });
-      console.log("Webhook установлен");
+      console.log(`API на :${PORT}`);
+      // Ставим webhook только если есть публичный HTTPS-адрес
+      if (PUBLIC && PUBLIC.startsWith("https://")) {
+        try {
+          await bot.telegram.setWebhook(`${PUBLIC}/webhook/telegram`, {
+            secret_token: secret,
+          });
+          console.log("Webhook установлен на", PUBLIC);
+        } catch (err) {
+          console.error("Не удалось установить webhook:", (err as Error)?.message);
+        }
+      } else {
+        console.log("Нет HTTPS BASE_URL — webhook НЕ установлен. Запускаю polling...");
+        await bot.launch().catch((e) => console.error("polling err:", e.message));
+      }
     });
   } else {
     // Polling — локальная отладка без HTTPS/вебхука.
