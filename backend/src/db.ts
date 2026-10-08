@@ -203,24 +203,20 @@ function resolveGame(
       const result = Math.random() < 0.5 ? "heads" : "tails";
       return { won: choice === result, multiplier: 2, label: result };
     }
-    case "dice": {
-      const roll = 1 + Math.floor(Math.random() * 6);
-      if (choice === "even") return { won: roll % 2 === 0, multiplier: 2, label: `🎲 ${roll}` };
-      if (choice === "over") return { won: roll >= 4, multiplier: 2, label: `🎲 ${roll}` };
-      return { won: false, multiplier: 0, label: `🎲 ${roll}` };
-    }
-    case "highlow": {
-      const bot = 2 + Math.floor(Math.random() * 10);
-      const player = 2 + Math.floor(Math.random() * 10);
-      const won =
-        choice === "higher" ? player > bot : choice === "lower" ? player < bot : false;
-      return { won, multiplier: 1.8, label: `${player} vs ${bot}` };
-    }
-    case "lucky": {
-      const n = 1 + Math.floor(Math.random() * 25);
-      return { won: n === 1, multiplier: 3, label: `#${n}` };
+    case "case": {
+      // Кейс (как в CS:GO): платишь цену кейса, получаешь случайную награду по редкости.
+      const roll = Math.random();
+      // Таблица редкостей: [шанс, множитель, название]
+      let rarity: { mult: number; name: string };
+      if (roll < 0.5) rarity = { mult: 1, name: "обычный" };        // 50% — возврат ставки
+      else if (roll < 0.75) rarity = { mult: 2, name: "редкий" };   // 25% — ×2
+      else if (roll < 0.93) rarity = { mult: 4, name: "эпический" }; // 18% — ×4
+      else rarity = { mult: 10, name: "легендарный" };               // 7% — ×10
+      const won = rarity.mult > 1; // обычный = возврат (не проигрыш, но и не выигрыш сверх ставки)
+      return { won, multiplier: rarity.mult, label: rarity.name };
     }
     default:
+      // rulette — 50/50
       return { won: Math.random() < 0.5, multiplier: 2, label: "" };
   }
 }
@@ -252,7 +248,14 @@ export const placeBet = transaction(
     if (betAmount > user.balance) throw new Error("insufficient_balance");
 
     const outcome = resolveGame(game, choice);
-    const delta = outcome.won ? Math.round(betAmount * outcome.multiplier) : -betAmount;
+    // Для кейса delta = чистая прибыль = ставка*(множитель-1).
+    // Для остальных: win = +ставка (×2), lose = -ставка.
+    let delta: number;
+    if (game === "case") {
+      delta = Math.round(betAmount * (outcome.multiplier - 1));
+    } else {
+      delta = outcome.won ? Math.round(betAmount * outcome.multiplier) : -betAmount;
+    }
 
     db.prepare(`UPDATE users SET balance = balance + ? WHERE telegram_id = ?`).run(delta, telegramId);
     db.prepare(
