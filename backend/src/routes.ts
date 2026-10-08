@@ -25,21 +25,20 @@ const BOT_TOKEN = process.env.BOT_TOKEN as string;
 router.use(authGuard);
 
 /** Resolve ref-кода в telegram_id (для /me). */
-function resolveRef(refCode: string | null): number | null {
+async function resolveRef(refCode: string | null): Promise<number | null> {
   if (!refCode) return null;
-  const row = db
-    .prepare(`SELECT telegram_id FROM users WHERE ref_code = ?`)
-    .get(refCode);
-  return row ? (row as any).telegram_id : null;
+  const row = await db.query(`SELECT telegram_id FROM users WHERE ref_code = $1`, [refCode]);
+  return row.rows[0] ? Number(row.rows[0].telegram_id) : null;
 }
 
 /** GET /api/me — юзер + баланс + история + флаги админа. */
-router.get("/me", requireAuth, (req: any, res: Response) => {
+router.get("/me", requireAuth, async (req: any, res: Response) => {
   const u = req.auth.user as TgUser;
-  const refId = resolveRef(req.auth.refCode ?? null);
+  const refId = await resolveRef(req.auth.refCode ?? null);
 
-  const user = ensureUser(u.id, u.username, refId && refId !== u.id ? refId : null);
-  const tx = getTransactions(u.id, 25);
+  const user = await ensureUser(u.id, u.username, refId && refId !== u.id ? refId : null);
+  const tx = await getTransactions(u.id, 25);
+  const [rc, drb] = await Promise.all([countReferrals(u.id), dailyBonusReady(u.id)]);
 
   res.json({
     ok: true,
@@ -47,11 +46,11 @@ router.get("/me", requireAuth, (req: any, res: Response) => {
       user: {
         telegramId: user.telegram_id,
         username: user.username,
-        balance: user.balance,
+        balance: Number(user.balance),
         refCode: user.ref_code,
         isAdmin: isAdmin(u.id),
-        referralCount: countReferrals(u.id),
-        dailyBonusReady: dailyBonusReady(u.id),
+        referralCount: rc,
+        dailyBonusReady: drb,
       },
       transactions: tx,
     },
@@ -59,28 +58,26 @@ router.get("/me", requireAuth, (req: any, res: Response) => {
 });
 
 /** Проверить, доступен ли ежедневный бонус сегодня. */
-function dailyBonusReady(userId: number): boolean {
-  const row: any = db
-    .prepare(`SELECT last_day FROM daily_bonus WHERE user_id = ?`)
-    .get(userId);
-  return !(row && row.last_day === moscowDay());
+async function dailyBonusReady(userId: number): Promise<boolean> {
+  const row = await db.query(`SELECT last_day FROM daily_bonus WHERE user_id = $1`, [userId]);
+  return !(row.rows[0] && row.rows[0].last_day === moscowDay());
 }
 
 /** GET /api/referrals — рефералы. */
-router.get("/referrals", requireAuth, (req: any, res: Response) => {
+router.get("/referrals", requireAuth, async (req: any, res: Response) => {
   const id = req.auth.user.id;
-  const myCode = getUser(id)?.ref_code ?? null;
-  const refs = db
-    .prepare(
-      `SELECT username, created_at FROM users
-       WHERE referred_by = ? ORDER BY created_at DESC LIMIT 100`
-    )
-    .all(id);
-  res.json({ ok: true, data: { refCode: myCode, referrals: refs } });
+  const myUser = await getUser(id);
+  const myCode = myUser?.ref_code ?? null;
+  const refs = await db.query(
+    `SELECT username, extract(epoch from created_at)::int AS created_at
+     FROM users WHERE referred_by = $1 ORDER BY created_at DESC LIMIT 100`,
+    [id]
+  );
+  res.json({ ok: true, data: { refCode: myCode, referrals: refs.rows } });
 });
 
 /** POST /api/admin/credit — magic-кнопка накрутки (только админ). */
-router.post("/admin/credit", requireAuth, (req: any, res: Response) => {
+router.post("/admin/credit", requireAuth, async (req: any, res: Response) => {
   const id = req.auth.user.id;
   if (!isAdmin(id)) return res.status(403).json({ ok: false, error: "forbidden" });
 
@@ -90,16 +87,21 @@ router.post("/admin/credit", requireAuth, (req: any, res: Response) => {
   if (!amount || amount <= 0)
     return res.status(400).json({ ok: false, error: "invalid_amount" });
 
-  const balance = adminCredit(targetId, amount);
-  res.json({ ok: true, data: { target: targetId, credited: amount, balance } });
+  try {
+    const balance = await adminCredit(targetId, amount);
+    return res.json({ ok: true, data: { target: targetId, credited: amount, balance } });
+  } catch (e: any) {
+    return res.status(400).json({ ok: false, error: e?.message || "credit_failed" });
+  }
 });
 
 /** POST /api/daily-bonus — бесплатные звёзды раз в сутки. */
-router.post("/daily-bonus", requireAuth, (req: any, res: Response) => {
+router.post("/daily-bonus", requireAuth, async (req: any, res: Response) => {
   const id = req.auth.user.id;
   const DAILY_BONUS = parseInt(process.env.DAILY_BONUS ?? "5", 10);
-  const { granted, bonus } = claimDailyBonus(id, DAILY_BONUS);
-  const balance = getUser(id)?.balance ?? 0;
+  const { granted, bonus } = await claimDailyBonus(id, DAILY_BONUS);
+  const u = await getUser(id);
+  const balance = Number(u?.balance ?? 0);
   res.json({ ok: true, data: { granted, bonus, balance } });
 });
 
@@ -109,16 +111,11 @@ router.post("/invoice", requireAuth, async (req: any, res: Response) => {
   const pkg = PACKAGES.find((p) => p.id === req.body.packageId);
   if (!pkg) return res.status(400).json({ ok: false, error: "invalid_package" });
 
-  // Уникальный payload для связки вебхука и юзера.
   const payload = `o_${crypto.randomBytes(10).toString("hex")}`;
-  createOrder(payload, u.id, pkg.id, pkg.amount);
+  await createOrder(payload, u.id, pkg.id, pkg.amount);
 
   try {
-    const invoiceLink = await createInvoiceLink(
-      pkg.title,
-      pkg.amount,
-      payload
-    );
+    const invoiceLink = await createInvoiceLink(pkg.title, pkg.amount, payload);
     return res.json({ ok: true, data: { invoiceLink, payload } });
   } catch (err) {
     console.error("invoice error", err);
@@ -127,7 +124,7 @@ router.post("/invoice", requireAuth, async (req: any, res: Response) => {
 });
 
 /** POST /api/bet — выбрать игру и поставить. */
-router.post("/bet", requireAuth, (req: any, res: Response) => {
+router.post("/bet", requireAuth, async (req: any, res: Response) => {
   const u = req.auth.user as TgUser;
   const betAmount = toInt(req.body.amount);
   const betId = (req.body.betId as string) ?? "";
@@ -143,13 +140,14 @@ router.post("/bet", requireAuth, (req: any, res: Response) => {
     return res.status(400).json({ ok: false, error: "invalid_bet" });
 
   try {
-    const user = getUser(u.id);
+    const user = await getUser(u.id);
     if (!user) return res.status(404).json({ ok: false, error: "user_not_found" });
-    if (betAmount > user.balance)
+    if (betAmount > Number(user.balance))
       return res.status(400).json({ ok: false, error: "insufficient_balance" });
 
-    const result = placeBet(u.id, betAmount, betId, game, choice);
-    const balance = getUser(u.id).balance;
+    const result = await placeBet(u.id, betAmount, betId, game, choice);
+    const after = await getUser(u.id);
+    const balance = Number(after.balance);
     return res.json({ ok: true, data: { ...result, balance } });
   } catch (err: any) {
     if (err?.message === "insufficient_balance")
@@ -170,32 +168,26 @@ export async function handlePaymentUpdate(msg: {
   if (!payment) return;
 
   const payload = payment.invoice_payload ?? "";
-  const order = getOrder(payload);
+  const order = await getOrder(payload);
   if (!order) return;
 
-  // Идемпотентность: если уже paid/пополнен — не трогаем
   if (order.status === "paid") return;
-
-  // Проверяем, что сумма совпадает с пакетом
-  if (order.amount !== payment.total_amount) return;
+  if (Number(order.amount) !== Number(payment.total_amount)) return;
 
   const ref = `${order.user_id}:${payment.telegram_payment_charge_id ?? payload}`;
-  applyTx(order.user_id, "purchase", order.amount, { ref });
-  markOrderPaid(payload);
+  await applyTx(order.user_id, "purchase", order.amount, { ref });
+  await markOrderPaid(payload);
 
-  // Бонус пригласившему
-  const me = getUser(order.user_id);
+  const me = await getUser(order.user_id);
   if (me?.referred_by) {
-    grantReferralBonus(me.referred_by, order.amount);
+    await grantReferralBonus(me.referred_by, order.amount);
   }
   console.log(`✅ пополнено ${order.amount} звёзд юзеру ${order.user_id}`);
 }
 
-function countReferrals(userId: number): number {
-  const r = db
-    .prepare(`SELECT COUNT(*) c FROM users WHERE referred_by = ?`)
-    .get(userId) as any;
-  return r?.c ?? 0;
+async function countReferrals(userId: number): Promise<number> {
+  const r = await db.query(`SELECT COUNT(*) AS c FROM users WHERE referred_by = $1`, [userId]);
+  return Number(r.rows[0]?.c ?? 0);
 }
 
 /** Прямой вызов Bot API createInvoiceLink. */
