@@ -42,8 +42,10 @@ async function start() {
   const bot = await createBot();
 
   if (MODE === "webhook") {
-    const secret = process.env.WEBHOOK_SECRET ?? "changeme";
+    const secret = process.env.WEBHOOK_SECRET;
+    if (!secret) throw new Error("WEBHOOK_SECRET not set");
     app.post("/webhook/telegram", async (req, res) => {
+      if (req.headers["x-telegram-bot-api-secret-token"] !== secret) return res.sendStatus(403);
       try {
         await bot.handleUpdate(req.body);
         res.sendStatus(200);

@@ -1,5 +1,6 @@
 import { Telegraf } from "telegraf";
 import { handlePaymentUpdate } from "./routes";
+import { db, ensureUser } from "./db";
 
 /**
  * Бот обрабатывает успешные платежи (successful_payment) и команды.
@@ -27,7 +28,7 @@ export async function createBot(): Promise<Telegraf> {
       .setChatMenuButton({
         menuButton: {
           type: "web_app",
-          text: "🎰 Играть",
+          text: "🎮 Играть",
           web_app: { url: appUrl },
         },
       })
@@ -35,20 +36,23 @@ export async function createBot(): Promise<Telegraf> {
   }
 
   // Команда /start — приветствие + кнопка запуска (если HTTPS) или текст.
-  bot.start((ctx) => {
+  bot.start(async (ctx) => {
     const startPayload = ctx.startPayload;
-    const url = startPayload ? `${appUrl}?start_param=ref_${startPayload}` : appUrl;
+    const refCode = startPayload?.match(/^ref_([0-9a-f]{8})$/)?.[1];
+    const ref = refCode ? await db.query(`SELECT telegram_id FROM users WHERE ref_code = $1`, [refCode]) : null;
+    const refId = ref?.rows[0] ? Number(ref.rows[0].telegram_id) : null;
+    await ensureUser(ctx.from.id, ctx.from.username, refId !== ctx.from.id ? refId : null);
 
     if (!httpsOk) {
       return ctx.reply(
-        "👋 Добро пожаловать в «Рулетку Звёзд»! 🎰\n\n⚠️ Mini App ещё не подключён по HTTPS. " +
+        "👋 Добро пожаловать в «ErrorDrop»! 🔴\n\n⚠️ Mini App ещё не подключён по HTTPS. " +
           "Установи туннель (cloudflared) и пропиши WEBAPP_URL с https://, чтобы открыть игру."
       );
     }
 
-    ctx.reply("👋 Добро пожаловать в «Рулетку Звёзд»! 🎰\nКупи звёзды, крути рулетку и умножай их. Удачи!", {
+    ctx.reply("🔴 Добро пожаловать в ErrorDrop!\nОткрывай кейсы, получай бонусы и приглашай друзей.", {
       reply_markup: {
-        inline_keyboard: [[{ text: "🎰 Открыть игру", web_app: { url } }]],
+        inline_keyboard: [[{ text: "🎮 Играть", web_app: { url: appUrl } }]],
       },
     });
   });

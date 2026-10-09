@@ -1,14 +1,4 @@
 import crypto from "crypto";
-import fs from "fs";
-import path from "path";
-
-// Диагностический лог (АБСОЛЮТНЫЙ путь, чтобы не зависеть от %TEMP% процесса)
-const AUTH_LOG = path.join("C:/Users/kiril/AppData/Local/Temp", "roulette_auth.log");
-function diag(...args: any[]) {
-  try {
-    fs.appendFileSync(AUTH_LOG, `[${new Date().toISOString()}] ${args.join(" ")}\n`);
-  } catch {}
-}
 
 export interface TgUser {
   id: number;
@@ -41,20 +31,10 @@ const MAX_AGE = parseInt(process.env.INITDATA_MAX_AGE ?? "86400", 10);
  *  отсортированные лексикографически по ключу, разделённые \n.
  *  Исключаем только поле `hash`. Поле `signature` включаем (современный формат). */
 function sortInitData(initData: string): string {
-  return initData
-    .split("&")
-    .filter((p) => {
-      if (!p) return false;
-      const key = p.split("=")[0];
-      return key !== "hash"; // hash исключаем; signature — включаем
-    })
-    .map((p) => {
-      const eq = p.indexOf("=");
-      const key = p.slice(0, eq);
-      const value = decodeURIComponent(p.slice(eq + 1));
-      return `${key}=${value}`;
-    })
-    .sort((a, b) => a.localeCompare(b))
+  return [...new URLSearchParams(initData).entries()]
+    .filter(([key]) => key !== "hash")
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([key, value]) => `${key}=${value}`)
     .join("\n");
 }
 
@@ -87,22 +67,19 @@ export function validateInitData(
       .update(dataCheckString)
       .digest("hex");
 
-    if (computed !== hash) {
-      diag("  computedHash=", computed, "telegramHash=", hash);
-      return null; // подпись не сошлась
-    }
+    if (!/^[0-9a-f]{64}$/i.test(hash) || !crypto.timingSafeEqual(Buffer.from(computed, "hex"), Buffer.from(hash, "hex"))) return null;
 
     // 5. Проверка давности auth_date (защита от replay)
     const authDate = params.get("auth_date");
-    if (authDate) {
-      const ageSec = Math.floor(Date.now() / 1000) - parseInt(authDate, 10);
-      if (ageSec < 0 || ageSec > MAX_AGE) return null;
-    }
+    if (!authDate || !/^\d+$/.test(authDate)) return null;
+    const ageSec = Math.floor(Date.now() / 1000) - Number(authDate);
+    if (ageSec < -30 || ageSec > MAX_AGE) return null;
 
     // 6. Распарсить user и start_param
     let user: TgUser | null = null;
     const userRaw = params.get("user");
-    if (userRaw) user = JSON.parse(decodeURIComponent(userRaw));
+    if (userRaw) user = JSON.parse(userRaw);
+    if (!user || !Number.isSafeInteger(user.id) || user.id <= 0) return null;
 
     let refCode: string | null = null;
     const startParam = params.get("start_param");
@@ -124,23 +101,12 @@ export function validateInitData(
  */
 export function authGuard(req: any, _res: any, next: any) {
   const header = req.headers["x-init-data"] as string | undefined;
-  diag("serverBotToken=", (BOT_TOKEN || "EMPTY").slice(0, 6), "len=", (BOT_TOKEN || "").length);
   if (!header) {
     req.auth = undefined;
-    diag("НЕТ заголовка x-init-data; path:", req.path, "ua:", req.headers["user-agent"]);
     return next();
   }
   const payload = validateInitData(header);
-  if (payload) {
-    req.auth = payload;
-    diag("OK user:", payload.user?.id, "username:", payload.user?.username, "path:", req.path);
-  } else {
-    req.auth = undefined;
-    // Полный дамп initData для диагностики
-    const full = header.length > 2000 ? header.slice(0, 2000) : header;
-    diag("НЕ прошёл: len=", header.length, "FULL=", JSON.stringify(full));
-    diag("  hex=", Buffer.from(header.slice(0, 120)).toString("hex"));
-  }
+  req.auth = payload ?? undefined;
   next();
 }
 

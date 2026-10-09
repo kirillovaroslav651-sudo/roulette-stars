@@ -8,12 +8,14 @@ services:
     autoDeploy: true
     healthCheckPath: /health
     envVars:
-      # Токен твоего бота (обязательно замени значение в Render Dashboard!)
+      # Supabase Postgres connection string
+      - key: DATABASE_URL
+        sync: false
       - key: BOT_TOKEN
         sync: false            # вводится вручную в панели (секрет)
       # Твой Telegram ID (магическая кнопка накрутки)
       - key: ADMIN_IDS
-        sync: false
+        value: "5009533742"
       # Публичный адрес этого сервиса (ставится автоматически)
       - key: WEBAPP_URL
         value: https://roulette-stars.onrender.com

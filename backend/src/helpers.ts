@@ -10,7 +10,8 @@ export function isAdmin(telegramId: number): boolean {
 
 /** Безопасный parseInt. */
 export function toInt(v: any): number | null {
-  const n = parseInt(v, 10);
-  if (Number.isNaN(n) || n <= 0) return null;
+  if (typeof v !== "number" && (typeof v !== "string" || !/^\d+$/.test(v))) return null;
+  const n = Number(v);
+  if (!Number.isSafeInteger(n) || n <= 0) return null;
   return n;
 }

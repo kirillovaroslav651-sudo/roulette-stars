@@ -11,8 +11,8 @@ export default function InviteCard({ refCode, referralCount, bonusPerInvite }: P
   const [copied, setCopied] = useState(false);
 
   // Бот-ссылка: /start?startapp=ref_<code> → попадает в initData.start_param
-  const botUsername = "YOUR_BOT_USERNAME"; // замени на реального бота
-  const inviteUrl = `https://t.me/${botUsername}?startapp=ref_${refCode}`;
+  const botUsername = "ErrorDrop_Bot";
+  const inviteUrl = `https://t.me/${botUsername}?start=ref_${refCode}`;
 
   const copy = async () => {
     try {
@@ -27,7 +27,7 @@ export default function InviteCard({ refCode, referralCount, bonusPerInvite }: P
 
   const share = () => {
     try {
-      WebApp.openTelegramLink(`https://t.me/${botUsername}?startapp=ref_${refCode}`);
+      WebApp.openTelegramLink(inviteUrl);
     } catch {
       copy();
     }

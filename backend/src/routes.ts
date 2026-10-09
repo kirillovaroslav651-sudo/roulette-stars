@@ -84,7 +84,7 @@ router.post("/admin/credit", requireAuth, async (req: any, res: Response) => {
   const amount = toInt(req.body.amount);
   const target = toInt(req.body.target);
   const targetId = target && target > 0 ? target : id;
-  if (!amount || amount <= 0)
+  if (!amount || amount <= 0 || amount > 100000)
     return res.status(400).json({ ok: false, error: "invalid_amount" });
 
   try {
@@ -135,8 +135,8 @@ router.post("/bet", requireAuth, async (req: any, res: Response) => {
   if (!VALID_GAMES.includes(game))
     return res.status(400).json({ ok: false, error: "invalid_game" });
 
-  if (!betId) return res.status(400).json({ ok: false, error: "missing_bet_id" });
-  if (!betAmount || betAmount <= 0)
+  if (!/^[a-zA-Z0-9_-]{8,80}$/.test(betId)) return res.status(400).json({ ok: false, error: "invalid_bet_id" });
+  if (!betAmount || betAmount <= 0 || betAmount > 100000)
     return res.status(400).json({ ok: false, error: "invalid_bet" });
 
   try {
@@ -152,6 +152,7 @@ router.post("/bet", requireAuth, async (req: any, res: Response) => {
   } catch (err: any) {
     if (err?.message === "insufficient_balance")
       return res.status(400).json({ ok: false, error: "insufficient_balance" });
+    if (err?.message === "duplicate_bet_id") return res.status(409).json({ ok: false, error: "duplicate_bet_id" });
     console.error("bet error", err);
     return res.status(500).json({ ok: false, error: "bet_failed" });
   }
@@ -198,7 +199,7 @@ async function createInvoiceLink(title: string, amount: number, payload: string)
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       title,
-      description: "Пополнение баланса в игре «Рулетка Звёзд»",
+      description: "Пополнение игрового баланса в ErrorDrop",
       payload,
       provider_token: "",
       currency: "XTR",

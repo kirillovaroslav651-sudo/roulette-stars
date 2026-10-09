@@ -10,8 +10,7 @@ if (!connectionString) {
 
 export const pool = new Pool({
   connectionString,
-  // Supabase требует SSL; отключаем проверку сертификата (самоподписанный/туннельный)
-  ssl: { rejectUnauthorized: false },
+  ssl: connectionString.includes("localhost") || connectionString.includes("127.0.0.1") ? false : { rejectUnauthorized: true },
   // Принудительно IPv4 — Render не имеет IPv6-маршрута (иначе ENETUNREACH)
   family: 4,
 } as any);
@@ -69,6 +68,7 @@ export async function initDb() {
       );
       CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id, created_at);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_bet ON transactions(bet_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_daily ON transactions(user_id, ref) WHERE type = 'daily_bonus';
       CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_purchase_ref ON transactions(ref);
       CREATE TABLE IF NOT EXISTS orders (
         payload      TEXT PRIMARY KEY,
@@ -242,12 +242,14 @@ export async function placeBet(
   try {
     await client.query("BEGIN");
 
-    const existing = await client.query(`SELECT spin_result FROM transactions WHERE bet_id = $1`, [betId]);
+    const existing = await client.query(`SELECT user_id, amount, game, spin_result, choice FROM transactions WHERE bet_id = $1`, [betId]);
     if (existing.rows[0]) {
+      const prev = existing.rows[0];
+      if (Number(prev.user_id) !== telegramId || prev.game !== game) throw new Error("duplicate_bet_id");
       await client.query("ROLLBACK");
       return {
-        won: existing.rows[0].spin_result === "win",
-        delta: existing.rows[0].spin_result === "win" ? +betAmount : -betAmount,
+        won: prev.spin_result === "win",
+        delta: Number(prev.amount),
       };
     }
 
@@ -262,7 +264,7 @@ export async function placeBet(
     if (game === "case") {
       delta = Math.round(betAmount * (outcome.multiplier - 1));
     } else {
-      delta = outcome.won ? Math.round(betAmount * outcome.multiplier) : -betAmount;
+      delta = outcome.won ? Math.round(betAmount * (outcome.multiplier - 1)) : -betAmount;
     }
 
     await client.query(`UPDATE users SET balance = balance + $1 WHERE telegram_id = $2`, [delta, telegramId]);
@@ -292,6 +294,7 @@ export async function placeBet(
 
 /** Накрутка звёзд админом. */
 export async function adminCredit(telegramId: number, amount: number): Promise<number> {
+  await ensureUser(telegramId, undefined);
   await applyTx(telegramId, "admin_credit", amount);
   const u = await getRawUser(telegramId);
   return Number(u.balance);
@@ -326,6 +329,7 @@ export async function claimDailyBonus(telegramId: number, amount: number): Promi
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query(`SELECT pg_advisory_xact_lock($1, $2)`, [17, telegramId]);
     const before = await client.query(`SELECT last_day FROM daily_bonus WHERE user_id = $1 FOR UPDATE`, [telegramId]);
     if (before.rows[0] && before.rows[0].last_day === day) {
       await client.query("ROLLBACK");
@@ -336,6 +340,11 @@ export async function claimDailyBonus(telegramId: number, amount: number): Promi
        ON CONFLICT (user_id) DO UPDATE SET last_day = EXCLUDED.last_day`,
       [telegramId, day]
     );
+    await client.query(`UPDATE users SET balance = balance + $1 WHERE telegram_id = $2`, [amount, telegramId]);
+    await client.query(
+      `INSERT INTO transactions (user_id, type, amount, ref) VALUES ($1, 'daily_bonus', $2, $3)`,
+      [telegramId, amount, `daily:${telegramId}:${day}`]
+    );
     await client.query("COMMIT");
   } catch (e) {
     await client.query("ROLLBACK");
@@ -344,8 +353,6 @@ export async function claimDailyBonus(telegramId: number, amount: number): Promi
     client.release();
   }
 
-  // начисляем бонус (вне транзакции блокировки, но идемпотентно по дню)
-  await applyTx(telegramId, "daily_bonus", amount);
   return { granted: true, bonus: amount };
 }
 
