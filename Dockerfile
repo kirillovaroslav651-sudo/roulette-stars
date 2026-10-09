@@ -19,7 +19,7 @@ RUN npm run build
 # Этап 3: runtime
 FROM node:22-alpine
 WORKDIR /app
-COPY --from=backend-build /app/backend/dist ./backend/dist
+COPY --from=backend-build /app/backend/dist ./backend/dist`n# runtime backend resolves frontend from /app/frontend/dist
 COPY --from=backend-build /app/backend/node_modules ./backend/node_modules
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
